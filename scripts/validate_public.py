@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import subprocess
 from pathlib import Path
 
 
@@ -102,6 +103,23 @@ def _without_public_project_references(text: str) -> str:
     return text
 
 
+def _check_places_yaml_untracked() -> str | None:
+    """places.yaml holds real commute destinations (e.g. a work address) —
+    exactly the private data this script otherwise pattern-scans for. Assert
+    it's gitignored rather than relying on the patterns above to catch it.
+    """
+    places_file = ROOT / "places.yaml"
+    if not places_file.exists():
+        return None
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", "places.yaml"],
+        cwd=ROOT,
+    )
+    if result.returncode != 0:
+        return "places.yaml: exists and is not gitignored"
+    return None
+
+
 def main() -> None:
     failures: list[str] = []
     for path, text in _iter_project_text():
@@ -118,6 +136,10 @@ def main() -> None:
         for label, pattern in {**PRIVATE_PATTERNS, "personal names": PERSONAL_NAME_PATTERN}.items():
             if pattern.search(fixture_text):
                 failures.append(f"{fixture.relative_to(ROOT)}: matched {label}")
+
+    places_failure = _check_places_yaml_untracked()
+    if places_failure:
+        failures.append(places_failure)
 
     if failures:
         raise SystemExit("Public validation failed:\n- " + "\n- ".join(failures))

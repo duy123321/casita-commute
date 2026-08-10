@@ -34,6 +34,9 @@ detail_cache/
 screenshots/
 tmp/
 
+# Personal commute destinations — see places.example.yaml
+places.yaml
+
 # Docs build output
 site/
 

@@ -14,6 +14,7 @@ from rich.table import Table
 from . import craigslist, dedup, html, llm, redfin, storage, walk, zillow, zumper
 from .browser import context
 from .models import Listing
+from .places import load_places
 from .rank import rank, score
 
 console = Console()
@@ -571,10 +572,12 @@ def _enrich_impl(force: bool):
 
         # 2) Walking-time matrix (Routes API, cached).
         walk_map = walk.populate_for(listings)
+        places = load_places()
+        place_map = walk.populate_for_places(listings, places)
 
         # 3) Cross-listing ranking with household priorities.
         console.print("[bold]gemini ranking…[/bold]")
-        ranks = llm.rank_listings(listings, walk_map, conn)
+        ranks = llm.rank_listings(listings, walk_map, conn, place_map=place_map, places=places)
 
         # 3a) Share-card blurbs — one per listing. Uses the post-rank state
         # (so the blurb can reference llm_reason / severity) and persists.
@@ -1057,8 +1060,15 @@ def _render_site(filename: str, output_dir: Path) -> dict[str, int | Path]:
             console.print(f"[bold]dedup:[/bold] deactivated {deactivated} duplicate listings")
         status_rows = conn.execute("SELECT listing_key, status FROM listing_status").fetchall()
         status_map = {r[0]: r[1] for r in status_rows}
-        listings = rank(storage.active_listings(conn), status_map=status_map,
-                        vote_scores=_vote_scores(conn))
+        raw_listings = storage.active_listings(conn)
+        # Commute places are computed before rank() (unlike walk_map below)
+        # so a bad near-daily commute can actually affect sort order and
+        # severity, not just render as a display-only annotation.
+        places = load_places()
+        place_map = walk.populate_for_places(raw_listings, places)
+        listings = rank(raw_listings, status_map=status_map,
+                        vote_scores=_vote_scores(conn),
+                        place_map=place_map, places=places)
         run = storage.latest_run(conn)
         walk_map = walk.populate_for(listings)
         drive_map = walk.populate_drive_for_marin(listings)
@@ -1094,6 +1104,7 @@ def _render_site(filename: str, output_dir: Path) -> dict[str, int | Path]:
     out_html.write_text(html.render(
         listings, run=run, walk_map=walk_map, convo_map=convo_map,
         drive_bakery_map=drive_bakery_map, drive_map=drive_map,
+        place_map=place_map, places=places,
     ))
 
     # Per-listing detail pages — one file per active listing under tmp/listing/.
@@ -1107,6 +1118,7 @@ def _render_site(filename: str, output_dir: Path) -> dict[str, int | Path]:
             page_html = listing_page.render_detail(
                 L, conn, walk_map=walk_map, drive_map=drive_map,
                 drive_bakery_map=drive_bakery_map,
+                place_map=place_map, places=places,
             )
             (listing_dir / f"{slug}.html").write_text(page_html)
             detail_count += 1
@@ -1124,10 +1136,12 @@ def _render_site(filename: str, output_dir: Path) -> dict[str, int | Path]:
                 shutil.copy2(f, dst_shots / f.name)
 
     og_count = _generate_og_images(output_dir, listings, run=run)
+    places_note = f"{len(places)} commute places, " if places else ""
     console.print(
         f"wrote {out_html} ({len(listings)} listings, "
         f"{len(convo_map)} with conversations, "
         f"{len(drive_bakery_map)} with bakery drive-times, "
+        f"{places_note}"
         f"{detail_count} detail pages, "
         f"{og_count} og images)"
     )
@@ -1188,6 +1202,10 @@ def demo(fixture: Path, host: str, port: int):
         "CASITA_ROUTE_CACHE_DB": str(demo_db),
         "CASITA_ROUTES_OFFLINE": "1",
         "CASITA_SITE_URL": url,
+        # Real places.yaml is gitignored (private addresses) — the demo shows
+        # the commute feature working against public landmarks instead, so
+        # it's visible with zero setup and no real address ever touches it.
+        "CASITA_PLACES_PATH": str(ROOT / "places.example.yaml"),
     }
     previous = {k: os.environ.get(k) for k in env_updates}
     try:

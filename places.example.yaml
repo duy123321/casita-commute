@@ -1,0 +1,39 @@
+# places.yaml — gitignored. Copy this file to places.yaml and fill in your
+# own destinations; casita picks it up automatically on the next render.
+#
+# importance:
+#   1 = near-daily     (work, school run)     — heaviest weight
+#   2 = weekly-ish     (gym, climbing, choir)
+#   3 = occasional     (parents, airport)     — tie-breaker only
+#
+# The three entries below are public San Francisco landmarks, not real
+# commute destinations — they exist so the feature is visible in
+# `uv run casita demo` without leaking anyone's actual address.
+
+commutes:
+  - name: "Ferry Building (Embarcadero)"
+    short: Ferry Bldg
+    lat: 37.7956
+    lng: -122.3933
+    importance: 1
+    mode: transit
+    cadence: "weekdays"
+    target_minutes: 35
+
+  - name: "Golden Gate Park (Conservatory of Flowers)"
+    short: GG Park
+    lat: 37.7716
+    lng: -122.4602
+    importance: 2
+    mode: drive
+    cadence: "3x / week"
+    target_minutes: 20
+
+  - name: "San Francisco International Airport"
+    short: SFO
+    lat: 37.6213
+    lng: -122.3790
+    importance: 3
+    mode: drive
+    cadence: "monthly"
+    target_minutes: 40

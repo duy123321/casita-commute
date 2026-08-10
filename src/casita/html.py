@@ -837,6 +837,8 @@ h1 {
 .chip-dog-large_ok, .chip-dog-dogs_ok { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 .chip-dog-small_only { color: var(--caution); background: var(--caution-soft); border-color: transparent; }
 .chip-dog-no_dogs    { color: var(--warn); background: var(--warn-soft); border-color: transparent; }
+.chip-commute-caution { color: var(--caution); background: var(--caution-soft); border-color: transparent; }
+.chip-commute-warn    { color: var(--warn); background: var(--warn-soft); border-color: transparent; }
 
 /* —— conversation pill on card (compact) —— */
 .card-convo {
@@ -1299,6 +1301,41 @@ def _walk_class(mins: int) -> str:
     return "v"
 
 
+def _commute_class(mins: int, target: int) -> str:
+    """Sibling to _walk_class: that one's 30/45 thresholds are calibrated for
+    walking to a bakery, so reusing it would paint every driving/transit
+    commute red. Scaled against the place's own target instead.
+    """
+    if mins > target * 2.0:
+        return "v warn"
+    if mins > target * 1.4:
+        return "v caution"
+    return "v"
+
+
+def _worst_commute(place_map: dict | None, L: Listing, places: list) -> tuple | None:
+    """The importance-1 (near-daily) place furthest over its own target, by
+    ratio — the one card chip shows only this one, since it's the commute
+    that would actually make the listing unworkable. None when there's no
+    importance-1 place with a computed time.
+    """
+    if not place_map or not places:
+        return None
+    worst = None
+    worst_ratio = -1.0
+    for p in places:
+        if p.importance != 1:
+            continue
+        m = place_map.get((L.key, p.name))
+        if m is None:
+            continue
+        ratio = m / p.target_minutes if p.target_minutes else float(m)
+        if ratio > worst_ratio:
+            worst_ratio = ratio
+            worst = (p, m)
+    return worst
+
+
 def _anchor_link_html(anchor, *, origin: tuple[float, float] | None = None,
                        mode: str = "walking") -> str:
     """Anchor link → Google Maps.
@@ -1391,6 +1428,7 @@ def _amenity_chips(L: Listing) -> list[str]:
 
 def _card(L: Listing, walk_map: dict | None = None, convo: dict | None = None,
           drive_bakery: tuple | None = None, drive_map: dict | None = None,
+          place_map: dict | None = None, places: list | None = None,
           feature: bool = False) -> str:
     """Card surface — editorial listing card:
        Photo (carousel) · source + dog overlays · neighborhood + fit verdict ·
@@ -1497,13 +1535,26 @@ def _card(L: Listing, walk_map: dict | None = None, convo: dict | None = None,
                 pass
         convo_pill = f'<span class="card-convo">{_esc(label)}</span>'
 
+    # Commute chip — the single worst near-daily place, if any. The card is
+    # deliberately sparse (everything else commute-related lives on detail),
+    # but a blown-out daily commute is exactly the kind of thing that should
+    # be visible before a click.
+    commute_chip_html = ""
+    worst_commute = _worst_commute(place_map, L, places or [])
+    if worst_commute:
+        p, m = worst_commute
+        chip_mod = {
+            "v warn": " chip-commute-warn", "v caution": " chip-commute-caution",
+        }.get(_commute_class(m, p.target_minutes), "")
+        commute_chip_html = f'<span class="chip-tag{chip_mod}">{_esc(p.short)} · {m}m</span>'
+
     # Amenity chips alongside the convo pill — yard / laundry / parking.
     amenity_html = "".join(
         f'<span class="chip-tag">{_esc(a)}</span>' for a in _amenity_chips(L)
     )
     tags_html = ""
-    if convo_pill or amenity_html:
-        tags_html = f'<div class="card-tags">{convo_pill}{amenity_html}</div>'
+    if convo_pill or commute_chip_html or amenity_html:
+        tags_html = f'<div class="card-tags">{convo_pill}{commute_chip_html}{amenity_html}</div>'
 
     address_line = ""
     if L.address:
@@ -1626,11 +1677,14 @@ def render(
     convo_map: dict[str, dict] | None = None,
     drive_bakery_map: dict | None = None,
     drive_map: dict | None = None,
+    place_map: dict | None = None,
+    places: list | None = None,
     title: str = "Casita",
 ) -> str:
     convo_map = convo_map or {}
     drive_bakery_map = drive_bakery_map or {}
     drive_map = drive_map or {}
+    places = places or []
 
     # Pick the feature card — the top-ranked strong fit that isn't eliminated.
     # rank() already sorts best-first, so the first qualifying listing wins.
@@ -1645,7 +1699,8 @@ def render(
     cards = "\n".join(
         _card(L, walk_map=walk_map, convo=convo_map.get(L.key),
               drive_bakery=drive_bakery_map.get(L.key),
-              drive_map=drive_map, feature=(L.key == feature_key))
+              drive_map=drive_map, place_map=place_map, places=places,
+              feature=(L.key == feature_key))
         for L in listings
     )
     ts_raw = (run["finished_at"] or run["started_at"]) if run else datetime.utcnow().isoformat()

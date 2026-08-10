@@ -12,6 +12,11 @@ Inputs are weighted in line with stated priorities, in priority order:
 
 Walking times come from the `walk_map` populated by walk.populate_for().
 When None, score is computed without those terms.
+
+Commute places (user-declared, from places.yaml) are a separate, opt-in
+input — `place_map` / `places`, populated by walk.populate_for_places() and
+places.load_places(). Absent places.yaml, both are empty and _commute_bonus
+contributes 0, so scoring is unchanged from the commute-less baseline.
 """
 from .models import Listing
 
@@ -47,7 +52,43 @@ def _walk_bonus(minutes: int | None, *, sweet_spot: int) -> int:
     return -3
 
 
-def score(listing: Listing, walk_map: dict | None = None) -> int:
+_IMPORTANCE_WEIGHT = {1: 3.0, 2: 1.5, 3: 0.5}
+
+
+def _commute_bonus(place_map: dict | None, listing_key: str, places: list) -> int:
+    """Score every declared place, weighted by how often you go.
+
+    Scaled against each place's own target rather than a global constant: a
+    40-minute transit commute is fine, a 40-minute walk to a bakery is not.
+    Returns 0 when there are no places — the voteless-baseline discipline
+    used elsewhere in this codebase (see llm._preference_examples): the
+    feature must not shift scores at all until places.yaml exists.
+    """
+    if not places or not place_map:
+        return 0
+    total = 0
+    for p in places:
+        m = place_map.get((listing_key, p.name))
+        if m is None:
+            continue
+        if m <= p.target_minutes:
+            raw = 15
+        elif m <= p.target_minutes * 1.4:
+            raw = 6
+        elif m <= p.target_minutes * 2.0:
+            raw = -5
+        else:
+            raw = -15
+        total += round(raw * _IMPORTANCE_WEIGHT.get(p.importance, 1.0))
+    return total
+
+
+def score(
+    listing: Listing,
+    walk_map: dict | None = None,
+    place_map: dict | None = None,
+    places: list | None = None,
+) -> int:
     s = 0
 
     # Dog policy — gate.
@@ -72,6 +113,7 @@ def score(listing: Listing, walk_map: dict | None = None) -> int:
             s += _walk_bonus(nb[1], sweet_spot=10)
 
     s += _hood_fallback_bonus(listing)
+    s += _commute_bonus(place_map, listing.key, places or [])
 
     # Size / config.
     if listing.beds and listing.beds >= 3:
@@ -114,6 +156,8 @@ def rank(
     walk_map: dict | None = None,
     status_map: dict[str, str] | None = None,
     vote_scores: dict[str, int] | None = None,
+    place_map: dict | None = None,
+    places: list | None = None,
 ) -> list[Listing]:
     """Sort order — six buckets:
      -2. Active pipeline — a live CRM status (contacted → viewing → applied):
@@ -149,5 +193,5 @@ def rank(
             bucket = 1
         else:
             bucket = 0
-        return (bucket, -net, -strength, L.llm_rank or 0, -score(L, walk_map))
+        return (bucket, -net, -strength, L.llm_rank or 0, -score(L, walk_map, place_map, places))
     return sorted(listings, key=sort_key)

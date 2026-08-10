@@ -33,6 +33,7 @@ from .html import (
     VOTE_JS,
     _anchor_link_html,
     _clean_address_for_maps,
+    _commute_class,
     _esc,
     _gcal_link,
     public_url,
@@ -153,6 +154,11 @@ _DETAIL_CSS = """
 
 .detail-kv .row { display: flex; gap: 14px; padding: 9px 0; font-size: 14.5px; border-bottom: 1px solid var(--line); }
 .detail-kv .row:last-child { border-bottom: 0; }
+.detail-kv .kv-group-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--ink-3); font-weight: 700; padding: 12px 0 4px;
+}
+.detail-kv .kv-group-label:first-child { padding-top: 0; }
 .detail-kv .k { color: var(--ink-3); text-transform: uppercase; font-size: 11px; letter-spacing: 0.07em; min-width: 110px; padding-top: 3px; font-weight: 600; }
 .detail-kv .v { color: var(--ink); flex: 1; font-weight: 500; }
 .detail-kv .v.warn { color: var(--warn); }
@@ -160,6 +166,7 @@ _DETAIL_CSS = """
 .detail-kv a { color: var(--accent); text-decoration: none; font-weight: 500; }
 .detail-kv a:hover { text-decoration: underline; }
 .detail-kv .contact-note { color: var(--ink-3); font-size: 12px; font-style: italic; margin-left: 4px; }
+.detail-kv .commute-cadence { color: var(--ink-3); font-size: 12px; font-style: italic; margin-left: 4px; }
 
 .detail-eliminated {
   margin: 0 0 22px;
@@ -243,8 +250,9 @@ _DETAIL_CSS = """
 """
 
 
-def _render_kv(L: Listing, walk_map, drive_map, drive_bakery) -> str:
+def _render_kv(L: Listing, walk_map, drive_map, drive_bakery, place_map=None, places=None) -> str:
     rows: list[str] = []
+    places = places or []
 
     def row(k: str, v: str, klass: str = "v") -> str:
         return f'<div class="row"><span class="k">{_esc(k)}</span><span class="{klass}">{v}</span></div>'
@@ -279,16 +287,41 @@ def _render_kv(L: Listing, walk_map, drive_map, drive_bakery) -> str:
     if L.other_visible:
         rows.append(row("features", _esc(_scrub(L.other_visible)), "v"))
 
+    # Listing origin for Directions URL — None when we lack coords.
+    origin = (L.lat, L.lng) if (L.lat is not None and L.lng is not None) else None
+
+    # Commute places — user-declared, rendered as their own group ABOVE the
+    # trail/beach/bakery rows below: these are obligations (go whether or not
+    # it's convenient), not lifestyle preferences, so they get a distinct
+    # sub-header rather than blending into the anchor rows. Sorted by
+    # importance so work leads.
+    if place_map and places:
+        _COMMUTE_MODE_SUFFIX = {
+            "walk": ' <span class="mode-word">walk</span>',
+            "drive": ' <span class="mode-word">drive</span>',
+            "transit": ' <span class="mode-word">transit</span>',
+        }
+        _COMMUTE_MAPS_MODE = {"walk": "walking", "drive": "driving", "transit": "transit"}
+        commute_rows = []
+        for p in sorted(places, key=lambda p: p.importance):
+            m = place_map.get((L.key, p.name))
+            if m is None:
+                continue
+            link = _anchor_link_html(p, origin=origin, mode=_COMMUTE_MAPS_MODE.get(p.mode, "driving"))
+            suffix = _COMMUTE_MODE_SUFFIX.get(p.mode, "")
+            cadence = f' <span class="commute-cadence">({_esc(p.cadence)})</span>' if p.cadence else ""
+            commute_rows.append(
+                row(p.short, f'{m} min{suffix} · {link}{cadence}', _commute_class(m, p.target_minutes))
+            )
+        if commute_rows:
+            rows.append('<div class="kv-group-label">Commutes</div>')
+            rows.extend(commute_rows)
+
     # Walk / drive times — same logic as the card.
     is_marin = L.lat is not None and L.lat > 37.84
     # Plain word suffixes — clearer than emoji and don't shift baseline.
-    WALK = ""
-    DRIVE = ""
     WALK_SUFFIX = ' <span class="mode-word">walk</span>'
     DRIVE_SUFFIX = ' <span class="mode-word">drive</span>'
-
-    # Listing origin for Directions URL — None when we lack coords.
-    origin = (L.lat, L.lng) if (L.lat is not None and L.lng is not None) else None
 
     if is_marin and drive_map:
         from .walk import SF_CENTER as _SFC
@@ -437,7 +470,8 @@ def _compose_share_blurb(L: Listing) -> str:
 
 
 def render_detail(L: Listing, conn: sqlite3.Connection, walk_map=None,
-                  drive_map=None, drive_bakery_map=None) -> str:
+                  drive_map=None, drive_bakery_map=None,
+                  place_map=None, places=None) -> str:
     listing_path = listing_url(L)
     share_blurb = _scrub(_compose_share_blurb(L)) or "Casita listing"
 
@@ -535,7 +569,7 @@ def render_detail(L: Listing, conn: sqlite3.Connection, walk_map=None,
     facts_html = (
         f'<div class="detail-section">'
         f'<h2>Facts</h2>'
-        f'{_render_kv(L, walk_map, drive_map, drive_bakery_map.get(L.key) if drive_bakery_map else None)}'
+        f'{_render_kv(L, walk_map, drive_map, drive_bakery_map.get(L.key) if drive_bakery_map else None, place_map=place_map, places=places)}'
         f'</div>'
     )
 

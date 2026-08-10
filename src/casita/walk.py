@@ -15,10 +15,16 @@ import math
 import os
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import httpx
 from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    from .places import Place
 
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
@@ -91,7 +97,11 @@ _WALK_SPEED_KMH = 4.5
 _GRID_FACTOR = 1.30
 _DRIVE_SPEED_KMH = 45.0
 _DRIVE_GRID_FACTOR = 1.20
+_TRANSIT_DRIVE_PENALTY = 1.8  # crude: transit ≈ drive time × 1.8, offline-only
 _ROUTES_URL = "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix"
+_TRANSIT_MAX_ELEMENTS = 100  # computeRouteMatrix cap for travelMode=TRANSIT (vs 625 for drive/walk)
+_MATRIX_MAX_ORIGINS = 25
+_PACIFIC = ZoneInfo("America/Los_Angeles")
 
 
 def _haversine_km(a_lat: float, a_lng: float, b_lat: float, b_lng: float) -> float:
@@ -115,6 +125,31 @@ def _haversine_minutes(lat: float, lng: float, anchor: Anchor) -> int:
 def _haversine_drive_minutes(lat: float, lng: float, anchor: Anchor) -> int:
     km = _haversine_km(lat, lng, anchor.lat, anchor.lng) * _DRIVE_GRID_FACTOR
     return max(1, round((km / _DRIVE_SPEED_KMH) * 60))
+
+
+def _haversine_transit_minutes(lat: float, lng: float, anchor: Anchor) -> int:
+    """Only used offline or on an API miss — crude, but keeps ordering sane
+    without pretending to model transfers, waits, or actual transit routes.
+    """
+    return max(1, round(_haversine_drive_minutes(lat, lng, anchor) * _TRANSIT_DRIVE_PENALTY))
+
+
+def _next_weekday_departure() -> str:
+    """RFC3339 departure time for TRANSIT requests: tomorrow (rolled past the
+    weekend if needed) at 08:30 America/Los_Angeles, converted to UTC.
+
+    TRANSIT routing needs a departureTime or Google picks an unstable
+    default, which would make cached results non-reproducible. This is
+    intentionally NOT part of the route cache key (mode alone is): the cache
+    treats every transit result as a "typical weekday morning" estimate and
+    doesn't re-fetch just because a day has passed.
+    """
+    now = datetime.now(_PACIFIC)
+    candidate = now + timedelta(days=1)
+    while candidate.weekday() >= 5:  # Saturday=5, Sunday=6
+        candidate += timedelta(days=1)
+    departure = candidate.replace(hour=8, minute=30, second=0, microsecond=0)
+    return departure.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ---------- cache (rounded coords as key) ----------
@@ -224,12 +259,18 @@ def _call_routes_api(
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
     if not _routes_api_enabled() or not api_key:
         return [[None] * len(destinations) for _ in origins]
-    travel_mode = "DRIVE" if mode == "drive" else "WALK"
+    travel_mode = {"drive": "DRIVE", "transit": "TRANSIT"}.get(mode, "WALK")
     body = {
         "origins": [{"waypoint": {"location": {"latLng": {"latitude": la, "longitude": ln}}}} for la, ln in origins],
         "destinations": [{"waypoint": {"location": {"latLng": {"latitude": la, "longitude": ln}}}} for la, ln in destinations],
         "travelMode": travel_mode,
     }
+    if travel_mode == "TRANSIT":
+        # Required, or Google picks an unstable default departure. Confirmed
+        # against current Routes API billing docs: departureTime alone does
+        # not move TRANSIT off the Essentials SKU — only routingPreference
+        # (TRAFFIC_AWARE / TRAFFIC_AWARE_OPTIMAL, drive-only) triggers Pro.
+        body["departureTime"] = _next_weekday_departure()
     # No routingPreference: omitting it bills the Essentials SKU instead of
     # traffic-aware Pro — static drive context doesn't need live traffic (#4).
     headers = {
@@ -398,6 +439,91 @@ def populate_for(listings) -> dict[tuple[str, str], int]:
         m = _cache_get(fl, fn, tl, tn)
         if m is not None:
             result[(lk, an)] = m
+    return result
+
+
+def _haversine_for_mode(mode: str, lat: float, lng: float, anchor: Anchor) -> int:
+    if mode == "drive":
+        return _haversine_drive_minutes(lat, lng, anchor)
+    if mode == "transit":
+        return _haversine_transit_minutes(lat, lng, anchor)
+    return _haversine_minutes(lat, lng, anchor)
+
+
+def _populate_for_places_mode(listings, places: "list[Place]", mode: str) -> dict[tuple[str, str], int]:
+    result: dict[tuple[str, str], int] = {}
+    pending_pairs: list[tuple[str, str, float, float, float, float]] = []
+    # ↑ (listing_key, place_name, fl, fn, tl, tn)
+
+    for L in listings:
+        if L.lat is None or L.lng is None:
+            continue
+        for p in places:
+            cached = _cache_get(L.lat, L.lng, p.lat, p.lng, mode=mode)
+            if cached is not None:
+                result[(L.key, p.name)] = cached
+            else:
+                pending_pairs.append((L.key, p.name, L.lat, L.lng, p.lat, p.lng))
+
+    if not pending_pairs:
+        return result
+
+    unique_origins: list[tuple[float, float]] = []
+    seen = set()
+    for _, _, fl, fn, _, _ in pending_pairs:
+        key = (_rnd(fl), _rnd(fn))
+        if key not in seen:
+            seen.add(key)
+            unique_origins.append((fl, fn))
+
+    destinations = [(p.lat, p.lng) for p in places]
+    # TRANSIT caps at 100 elements/request (vs 625 for drive/walk) — shrink
+    # the origin chunk so origins × destinations stays under that ceiling.
+    chunk_size = (
+        max(1, _TRANSIT_MAX_ELEMENTS // max(1, len(destinations)))
+        if mode == "transit" else _MATRIX_MAX_ORIGINS
+    )
+
+    label = f"routes api ({mode})" if _routes_api_enabled() else f"routes fallback ({mode})"
+    print(f"  {label}: {len(unique_origins)} origins × {len(destinations)} places")
+    for chunk_start in range(0, len(unique_origins), chunk_size):
+        chunk = unique_origins[chunk_start:chunk_start + chunk_size]
+        matrix = _call_routes_api(chunk, destinations, mode=mode)
+        for i, (fl, fn) in enumerate(chunk):
+            for j, (tl, tn) in enumerate(destinations):
+                mins = matrix[i][j]
+                if mins is None:
+                    mins = _haversine_for_mode(mode, fl, fn, places[j])
+                    _cache_put(fl, fn, tl, tn, mins, "haversine", mode=mode)
+                else:
+                    _cache_put(fl, fn, tl, tn, mins, "api", mode=mode)
+
+    for lk, pn, fl, fn, tl, tn in pending_pairs:
+        m = _cache_get(fl, fn, tl, tn, mode=mode)
+        if m is not None:
+            result[(lk, pn)] = m
+    return result
+
+
+def populate_for_places(listings, places: "list[Place]") -> dict[tuple[str, str], int]:
+    """Ensure every (listing, place) pair has a cached minutes value.
+
+    Returns {(listing.key, place.name): minutes} — a dict separate from the
+    walk_map returned by populate_for(), so a place named like an existing
+    anchor (e.g. "Ocean Beach") can't silently overwrite it.
+
+    A single computeRouteMatrix call carries one travelMode, so places are
+    grouped by mode and issued as separate matrix calls per origin chunk.
+    """
+    if not places:
+        return {}
+    by_mode: dict[str, list] = {}
+    for p in places:
+        by_mode.setdefault(p.mode, []).append(p)
+
+    result: dict[tuple[str, str], int] = {}
+    for mode, group in by_mode.items():
+        result.update(_populate_for_places_mode(listings, group, mode))
     return result
 
 

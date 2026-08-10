@@ -251,6 +251,24 @@ _RANK_SYSTEM = textwrap.dedent("""
             They should not outrank a comparable dogs_ok / large_ok listing.
           - **dogs_ok / large_ok** → eligible for severity="ok".
           - **null/unknown** → severity="concerns", flag the verification need.
+      • COMMUTES — user-declared destinations the household actually has to
+        reach, distinct from the trail/beach/bakery PREFERENCES below. The
+        brief's "walks" field may carry a trailing "| COMMUTES: ..." clause,
+        one entry per place, each stating its own target and cadence
+        (e.g. "Work 38m transit (target 35, weekdays)"). When that clause is
+        absent, ignore this rule entirely — never invent or infer a commute.
+        Judge each place against ITS OWN stated target, not general intuition
+        about SF traffic:
+          - importance=1 (near-daily, e.g. work) — over target by more than
+            40% is a heavy penalty, severity="concerns" minimum, and the
+            reason must name the place and its minutes. Over target by more
+            than 2x → severity="filtered": a listing that fails a near-daily
+            obligation this badly isn't livable regardless of its other
+            merits, the same way a hard no-dogs policy is disqualifying.
+          - importance=2 (weekly-ish) — moderate penalty when well over
+            target; this alone never justifies "filtered".
+          - importance=3 (occasional) — tie-breaker only; never moves
+            severity in either direction.
       • For Marin listings: a private yard is strongly preferred
         (fenced backyard, side yard, or private patio with grass). NEVER
         hard-filter a Marin listing for yard alone — treat missing/
@@ -295,7 +313,10 @@ _RANK_SYSTEM = textwrap.dedent("""
     For SF listings, all times are WALKING — apply the bakery preference, etc.
     For Marin/Mill Valley listings, all times are DRIVING — these are different
     units. Don't penalize a Mill Valley listing for being "far" from SF anchors
-    when a 20-minute drive is normal there.
+    when a 20-minute drive is normal there. A trailing "| COMMUTES: ..." on
+    the same field is a separate category — see COMMUTES under HARD
+    REQUIREMENTS — and uses whatever mode (walk/drive/transit) each place
+    declares, independent of the listing's SF-vs-Marin WALKING/DRIVING mode.
 
     ── PREFERENCES — in priority order, used to break ties and shape ranking ──
       (Trail/beach ACCESS is now a strong requirement above; #2/#3 here govern
@@ -639,8 +660,29 @@ def _preference_examples(conn: sqlite3.Connection, *, cap: int = _EXAMPLES_CAP) 
     return header + "\n" + "\n".join(lines)
 
 
+def _commute_summary(L: Listing, place_map: dict | None, places: list) -> str:
+    """COMMUTES clause appended to the walks field — kept out of _walk_summary
+    to keep that function's Marin/SF branches readable. Empty places or
+    place_map => "" so the brief is byte-identical to the placeless baseline
+    (same discipline as _preference_examples on cold start).
+    """
+    if not places or not place_map:
+        return ""
+    bits = []
+    for p in sorted(places, key=lambda p: p.importance):
+        m = place_map.get((L.key, p.name))
+        if m is None:
+            continue
+        cadence = f", {p.cadence}" if p.cadence else ""
+        bits.append(f"{p.short} {m}m {p.mode} (target {p.target_minutes}{cadence})")
+    if not bits:
+        return ""
+    return "COMMUTES: " + ", ".join(bits)
+
+
 def rank_listings(
-    listings: list[Listing], walk_map: dict, conn: sqlite3.Connection
+    listings: list[Listing], walk_map: dict, conn: sqlite3.Connection,
+    place_map: dict | None = None, places: list | None = None,
 ) -> dict[str, tuple[int, str, str]]:
     """Return {key: (rank, reason, severity)}."""
     if not listings:
@@ -649,6 +691,7 @@ def rank_listings(
     from .walk import BAKERIES, BEACHES, SF_CENTER, TRAILS, minutes_to, nearest, is_marin, populate_drive_for_marin
 
     drive_map = populate_drive_for_marin(listings)
+    places = places or []
 
     def _walk_summary(L: Listing) -> str:
         if is_marin(L) and drive_map:
@@ -671,18 +714,21 @@ def rank_listings(
             if b: bits.append(f"{b[1]}m drive beach({b[0].short})")
             ba = _best(BAKERIES)
             if ba: bits.append(f"{ba[1]}m drive bakery({ba[0].short})")
-            return ", ".join(bits)
-        # SF: walking.
-        sf = minutes_to(walk_map, L.key, SF_CENTER[0])
-        np = nearest(walk_map, L.key, TRAILS)
-        nb = nearest(walk_map, L.key, BEACHES)
-        nba = nearest(walk_map, L.key, BAKERIES)
-        bits = ["WALKING (SF)"]
-        if sf is not None: bits.append(f"{sf}m walk SF")
-        if np: bits.append(f"{np[1]}m walk trail({np[0].short})")
-        if nb: bits.append(f"{nb[1]}m walk beach({nb[0].short})")
-        if nba: bits.append(f"{nba[1]}m walk bakery({nba[0].short})")
-        return ", ".join(bits)
+            base = ", ".join(bits)
+        else:
+            # SF: walking.
+            sf = minutes_to(walk_map, L.key, SF_CENTER[0])
+            np = nearest(walk_map, L.key, TRAILS)
+            nb = nearest(walk_map, L.key, BEACHES)
+            nba = nearest(walk_map, L.key, BAKERIES)
+            bits = ["WALKING (SF)"]
+            if sf is not None: bits.append(f"{sf}m walk SF")
+            if np: bits.append(f"{np[1]}m walk trail({np[0].short})")
+            if nb: bits.append(f"{nb[1]}m walk beach({nb[0].short})")
+            if nba: bits.append(f"{nba[1]}m walk bakery({nba[0].short})")
+            base = ", ".join(bits)
+        commutes = _commute_summary(L, place_map, places)
+        return f"{base} | {commutes}" if commutes else base
 
     feedback_map = _current_feedback(conn, [L.key for L in listings])
     body = "\n".join(
