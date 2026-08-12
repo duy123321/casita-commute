@@ -35,6 +35,10 @@ Copy `.env.example` to `.env` for live/private runs. `publish --local` renders
 from the local SQLite file, but it still deploys to Firebase; set
 `CASITA_FIREBASE_PROJECT` or pass `--project`.
 
+Copy `places.example.yaml` to `places.yaml` to declare your own commute
+destinations — work, gym, family. It's optional and gitignored; see
+[Commutes](how-it-works/commutes.md).
+
 !!! warning "Google Maps cost"
 
     `search` and `enrich` can eventually call `walk.py`, which uses the paid

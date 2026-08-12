@@ -12,6 +12,7 @@ nav = [
   { "Getting Started" = "getting-started.md" },
   { "How It Works" = [
     { "Routing" = "how-it-works/routing.md" },
+    { "Commutes" = "how-it-works/commutes.md" },
     { "Photo Evaluation" = "how-it-works/photo-eval.md" },
     { "Deduplication" = "how-it-works/deduplication.md" },
     { "Ranking" = "how-it-works/ranking.md" },

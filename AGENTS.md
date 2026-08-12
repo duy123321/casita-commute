@@ -34,6 +34,7 @@ offline route behavior, renders the static site, and serves it at
 - `src/casita/zillow.py`, `craigslist.py`, `zumper.py`, `redfin.py` - live source scrapers.
 - `src/casita/locations.py` - canonical SF and Marin search terms shared by scrapers.
 - `src/casita/llm.py`, `rank.py`, `walk.py`, `dedup.py` - enrichment, scoring, routing, and deduplication.
+- `src/casita/places.py` - user-declared commute destinations, loaded from the gitignored `places.yaml`.
 - `src/casita/html.py`, `listing_page.py`, `static/` - static site rendering and assets.
 - `src/casita/cloud_sync.py` - optional private GCS/Firebase deployment plumbing.
 - `fixtures/demo.sqlite` - sanitized offline fixture used by the demo and tests.
@@ -53,6 +54,7 @@ docs page before changing code.
 | SQLite schema and fixture contract | [`docs/data-model.md`](docs/data-model.md) |
 | Source scraping behavior | [`docs/scraping.md`](docs/scraping.md) |
 | Route matrix cache, Maps costs, offline fallback | [`docs/how-it-works/routing.md`](docs/how-it-works/routing.md) |
+| User-declared commute places, scoring, transit routing | [`docs/how-it-works/commutes.md`](docs/how-it-works/commutes.md) |
 | Gemini photo review | [`docs/how-it-works/photo-eval.md`](docs/how-it-works/photo-eval.md) |
 | Deterministic and LLM ranking | [`docs/how-it-works/ranking.md`](docs/how-it-works/ranking.md) |
 | Vote feedback loop | [`docs/how-it-works/learning.md`](docs/how-it-works/learning.md) |
@@ -65,6 +67,9 @@ docs page before changing code.
   the demo path or tests.
 - Keep private names, emails, phone numbers, project IDs, API keys, one-off
   operational details, and the chosen home out of the public tree.
+- `places.yaml` (real commute destinations, e.g. a work address) must stay
+  gitignored — `scripts/validate_public.py` asserts this. Commit
+  `places.example.yaml` instead; it holds public landmarks only.
 - Run `uv run python scripts/validate_public.py` after touching fixtures,
   prompts, docs, rendered copy, or source strings.
 - Live `search`, `enrich`, and `publish` paths may use credentials from
